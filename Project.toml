@@ -3,6 +3,7 @@ uuid = "5c8ed15e-5a4c-59e4-a42b-c7e8811fb125"
 version = "2.5.1"
 
 [deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 FastClosures = "9aa1b823-49e4-5ca5-8b0f-3971ec8bab6a"
 LDLFactorizations = "40e66cde-538c-5869-a4ad-c39174c6795b"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -11,6 +12,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 
 [compat]
+CUDA = "3.12.1"
 FastClosures = "0.2, 0.3"
 LDLFactorizations = "0.9, 0.10"
 TimerOutputs = "^0.5"
