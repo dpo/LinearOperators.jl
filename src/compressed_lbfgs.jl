@@ -142,7 +142,7 @@ end
 # Algorithm 3.2 (p15)
 # step 4, Jₖ is computed only if needed
 function inverse_cholesky(op::CompressedLBFGS)
-  view(op.chol_matrix, 1:op.k, 1:op.k) .= op.α .* (transpose(view(op.Sₖ, :, 1:op.k)) * view(op.Sₖ, :, 1:op.k)) .+ view(op.Lₖ, 1:op.k, 1:op.k) * inv(op.Dₖ[1:op.k, 1:op.k]) * transpose(view(op.Lₖ, 1:op.k, 1:op.k))
+  view(op.chol_matrix, 1:op.k, 1:op.k) .= op.α .* (transpose(view(op.Sₖ, :, 1:op.k)) * view(op.Sₖ, :, 1:op.k)) .+ view(op.Lₖ, 1:op.k, 1:op.k) * inv(Diagonal(op.Dₖ[1:op.k, 1:op.k])) * transpose(view(op.Lₖ, 1:op.k, 1:op.k))
   cholesky!(Symmetric(view(op.chol_matrix, 1:op.k, 1:op.k)))
   Jₖ = transpose(UpperTriangular(view(op.chol_matrix, 1:op.k, 1:op.k)))
   return Jₖ
