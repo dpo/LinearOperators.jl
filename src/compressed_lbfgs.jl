@@ -67,6 +67,11 @@ function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=si
   return A
 end
 
+function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=size(A)[1]) where T
+  map(i-> view(A,:,i+direction) .= view(A,:,i), 1-direction:indicemax)
+  return A
+end
+
 """
     CompressedLBFGS(n::Int; [T=Float64, m=5], gpu:Bool)
 
@@ -100,21 +105,16 @@ function Base.push!(op::CompressedLBFGS{T,M,V}, s::V, y::V) where {T,M,V<:Abstra
     view(op.Yₖ, :, op.k) .= y
     view(op.Dₖ.diag, op.k) .= dot(s, y)
     mul!(view(op.Lₖ.data, op.k, 1:op.k-1), transpose(view(op.Yₖ, :, 1:op.k-1)), view(op.Sₖ, :, op.k) )
-    
   else # k == m update circurlarly the intermediary structures
-    op.Sₖ .= circshift(op.Sₖ, (0, -1))
-    op.Yₖ .= circshift(op.Yₖ, (0, -1))
+    columnshift!(op.Sₖ; indicemax=op.k)
+    columnshift!(op.Yₖ; indicemax=op.k)
     op.Dₖ .= circshift(op.Dₖ, (-1, -1))
-    op.Sₖ[:, op.k] .= s
-    op.Yₖ[:, op.k] .= y
-    op.Dₖ.diag[op.k] = dot(s, y)
-    # circshift doesn't work for a LowerTriangular matrix
-    # for the time being, reinstantiate completely the Lₖ matrix
-    for j in 1:op.k 
-      for i in 1:j-1
-        op.Lₖ.data[j, i] = dot(view(op.Sₖ,:, j), view(op.Yₖ, :, i))
-      end
-    end
+    view(op.Sₖ, :, op.k) .= s
+    view(op.Yₖ, :, op.k) .= y
+    view(op.Dₖ.diag, op.k) .= dot(s, y)
+
+    map(i-> view(op.Lₖ, i:op.m-1, i-1) .= view(op.Lₖ, i+1:op.m, i), 2:op.m)
+    mul!(view(op.Lₖ.data, op.k, 1:op.k-1), transpose(view(op.Yₖ, :, 1:op.k-1)), view(op.Sₖ, :, op.k) )
   end
 
   # step 4 and 6
@@ -150,15 +150,11 @@ end
 function inverse_cholesky(op::CompressedLBFGS{T,M,V}) where {T,M,V}
   view(op.intermediate_diagonal.diag, 1:op.k) .= inv.(view(op.Dₖ.diag, 1:op.k))
   
-  # view(op.Lₖ, 1:op.k, 1:op.k) * inv(Diagonal(op.Dₖ[1:op.k, 1:op.k])) * transpose(view(op.Lₖ, 1:op.k, 1:op.k))
   mul!(view(op.inverse_intermediate_1, 1:op.k, 1:op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k), transpose(view(op.Lₖ, 1:op.k, 1:op.k)))
   mul!(view(op.chol_matrix, 1:op.k, 1:op.k), view(op.Lₖ, 1:op.k, 1:op.k), view(op.inverse_intermediate_1, 1:op.k, 1:op.k))
 
-  # view(op.chol_matrix, 1:op.k, 1:op.k) .= op.α .* (transpose(view(op.Sₖ, :, 1:op.k)) * view(op.Sₖ, :, 1:op.k)) 
   mul!(view(op.chol_matrix, 1:op.k, 1:op.k), transpose(view(op.Sₖ, :, 1:op.k)), view(op.Sₖ, :, 1:op.k), op.α, (T)(1))
 
-  # view(op.chol_matrix, 1:op.k, 1:op.k) .= op.α .* (transpose(view(op.Sₖ, :, 1:op.k)) * view(op.Sₖ, :, 1:op.k)) .+ view(op.Lₖ, 1:op.k, 1:op.k) * inv(Diagonal(op.Dₖ[1:op.k, 1:op.k])) * transpose(view(op.Lₖ, 1:op.k, 1:op.k))
-  
   cholesky!(Symmetric(view(op.chol_matrix, 1:op.k, 1:op.k)))
   Jₖ = transpose(UpperTriangular(view(op.chol_matrix, 1:op.k, 1:op.k)))
   return Jₖ
@@ -182,10 +178,8 @@ function precompile_iterated_structure!(op::CompressedLBFGS)
   # updates related to D^(-1/2)
   view(op.intermediate_diagonal.diag, 1:op.k) .= (x -> 1/sqrt(x)).(view(op.Dₖ.diag, 1:op.k))
   mul!(view(op.intermediate_1, 1:op.k,op.k+1:2*op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k), transpose(view(op.Lₖ, 1:op.k, 1:op.k)))
-  # view(op.intermediate_1, 1:op.k,op.k+1:2*op.k) .= view(op.Dₖ, 1:op.k, 1:op.k)^(-1/2) * transpose(view(op.Lₖ, 1:op.k, 1:op.k))
   mul!(view(op.intermediate_2, op.k+1:2*op.k, 1:op.k), view(op.Lₖ, 1:op.k, 1:op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k))
   view(op.intermediate_2, op.k+1:2*op.k, 1:op.k) .= view(op.intermediate_2, op.k+1:2*op.k, 1:op.k) .* -1
-  # view(op.intermediate_2, op.k+1:2*op.k, 1:op.k) .= .- view(op.Lₖ, 1:op.k, 1:op.k) * view(op.Dₖ, 1:op.k, 1:op.k)^(-1/2)
   
   view(op.inverse_intermediate_1, 1:2*op.k, 1:2*op.k) .= inv(op.intermediate_1[1:2*op.k, 1:2*op.k])
   view(op.inverse_intermediate_2, 1:2*op.k, 1:2*op.k) .= inv(op.intermediate_2[1:2*op.k, 1:2*op.k])
@@ -200,12 +194,10 @@ function LinearAlgebra.mul!(Bv::V, op::CompressedLBFGS{T,M,V}, v::V) where {T,M,
   # scal!(op.α, view(op.sol, op.k+1:2*op.k)) # more allocation, slower
   view(op.sol, op.k+1:2*op.k) .*= op.α
 
-  # view(op.sol, 1:2*op.k) .= view(op.inverse_intermediate_1, 1:2*op.k, 1:2*op.k) * (view(op.inverse_intermediate_2, 1:2*op.k, 1:2*op.k) * view(op.sol, 1:2*op.k))
   mul!(view(op.intermediary_vector, 1:2*op.k), view(op.inverse_intermediate_2, 1:2*op.k, 1:2*op.k), view(op.sol, 1:2*op.k))
   mul!(view(op.sol, 1:2*op.k), view(op.inverse_intermediate_1, 1:2*op.k, 1:2*op.k), view(op.intermediary_vector, 1:2*op.k))
   
   # step 7 
-  # Bv .= op.α .* v .- (view(op.Yₖ, :,1:op.k) * view(op.sol, 1:op.k) .+ op.α .* view(op.Sₖ, :, 1:op.k) * view(op.sol, op.k+1:2*op.k))
   mul!(Bv, view(op.Yₖ, :, 1:op.k),  view(op.sol, 1:op.k))
   mul!(Bv, view(op.Sₖ, :, 1:op.k), view(op.sol, op.k+1:2*op.k), - op.α, (T)(-1))
   Bv .+= op.α .* v 
