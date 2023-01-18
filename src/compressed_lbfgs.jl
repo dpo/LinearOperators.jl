@@ -10,17 +10,17 @@ Implemented by Paul Raynaud (supervised by Dominique Orban)
 using LinearAlgebra, LinearAlgebra.BLAS
 using CUDA
 
-export CompressedLBFGS
+export CompressedLBFGSOperator
 
 """
-    CompressedLBFGS{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
+    CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
 
 A LBFGS limited-memory operator.
-It represents a linear application Rⁿˣⁿ, considering at most `m` BFGS updates.
+It represents a linear application Rⁿˣⁿ, considering at most `mem` BFGS updates.
 This implementation considers the bloc matrices reoresentation of the BFGS (forward) update.
 It follows the algorithm described in [REPRESENTATIONS OF QUASI-NEWTON MATRICES AND THEIR USE IN LIMITED MEMORY METHODS](https://link.springer.com/article/10.1007/BF01582063) from Richard H. Byrd, Jorge Nocedal and Robert B. Schnabel (1994).
 This operator considers several fields directly related to the bloc representation of the operator:
-- `m`: the maximal memory of the operator;
+- `mem`: the maximal memory of the operator;
 - `n`: the dimension of the linear application;
 - `k`: the current memory's size of the operator;
 - `α`: scalar for `B₀ = α I`;
@@ -28,7 +28,7 @@ This operator considers several fields directly related to the bloc representati
 - `Yₖ`: retain the `k`-th last vectors `y` from the updates parametrized by `(s,y)`;;
 - `Dₖ`: a diagonal matrix mandatory to perform the linear application and to form the matrix;
 - `Lₖ`: a lower diagonal mandatory to perform the linear application and to form the matrix.
-In addition to this structures which are circurlarly update when `k` reaches `m`, we consider other intermediate data structures renew at each update:
+In addition to this structures which are circurlarly update when `k` reaches `mem`, we consider other intermediate data structures renew at each update:
 - `chol_matrix`: a matrix required to store a Cholesky factorization of a Rᵏˣᵏ matrix;
 - `intermediate_1`: a R²ᵏˣ²ᵏ matrix;
 - `intermediate_2`: a R²ᵏˣ²ᵏ matrix;
@@ -38,24 +38,24 @@ In addition to this structures which are circurlarly update when `k` reaches `m`
 - `sol`: a vector ∈ Rᵏ to store intermediate solutions;
 This implementation is designed to work either on CPU or GPU.
 """
-mutable struct CompressedLBFGS{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
-  m::Int # memory of the operator
+mutable struct CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
+  mem::Int # memory of the operator
   n::Int # vector size
-  k::Int # k ≤ m, active memory of the operator
+  k::Int # k ≤ mem, active memory of the operator
   α::T # B₀ = αI
   Sₖ::M # gather all sₖ₋ₘ 
   Yₖ::M # gather all yₖ₋ₘ 
-  Dₖ::Diagonal{T,V} # m * m
-  Lₖ::LowerTriangular{T,M} # m * m
+  Dₖ::Diagonal{T,V} # mem * mem
+  Lₖ::LowerTriangular{T,M} # mem * mem
 
   chol_matrix::M # 2m * 2m
-  intermediate_diagonal::Diagonal{T,V} # m * m
+  intermediate_diagonal::Diagonal{T,V} # mem * mem
   intermediate_1::UpperTriangular{T,M} # 2m * 2m
   intermediate_2::LowerTriangular{T,M} # 2m * 2m
   inverse_intermediate_1::UpperTriangular{T,M} # 2m * 2m
   inverse_intermediate_2::LowerTriangular{T,M} # 2m * 2m
   intermediary_vector::V # 2m
-  sol::V # m
+  sol::V # mem
 end
 
 default_gpu() = CUDA.functional() ? true : false
@@ -67,53 +67,54 @@ function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=si
   return A
 end
 
-function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=size(A)[1]) where T
-  map(i-> view(A,:,i+direction) .= view(A,:,i), 1-direction:indicemax)
-  return A
+function vectorshift!(v::AbstractVector{T}; direction::Int=-1, indicemax::Int=length(v)) where T
+  view(v, 1:indicemax+direction) .= view(v,1-direction:indicemax)
+  return v
 end
 
 """
-    CompressedLBFGS(n::Int; [T=Float64, m=5], gpu:Bool)
+    CompressedLBFGSOperator(n::Int; [T=Float64, mem=5], gpu:Bool)
 
 A implementation of a LBFGS operator (forward), representing a `nxn` linear application.
 It considers at most `k` BFGS iterates, and fit the architecture depending if it is launched on a CPU or a GPU.
 """
-function CompressedLBFGS(n::Int; m::Int=5, T=Float64, gpu=default_gpu(), M=default_matrix_type(gpu; T), V=default_vector_type(gpu; T))
+function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, gpu=default_gpu(), M=default_matrix_type(gpu; T), V=default_vector_type(gpu; T))
   α = (T)(1)
   k = 0  
-  Sₖ = M(undef, n, m)
-  Yₖ = M(undef, n, m)
-  Dₖ = Diagonal(V(undef, m))
-  Lₖ = LowerTriangular(M(undef, m, m))
+  Sₖ = M(undef, n, mem)
+  Yₖ = M(undef, n, mem)
+  Dₖ = Diagonal(V(undef, mem))
+  Lₖ = LowerTriangular(M(undef, mem, mem))
   Lₖ .= (T)(0)
 
-  chol_matrix = M(undef, m, m)
-  intermediate_diagonal = Diagonal(V(undef, m))
-  intermediate_1 = UpperTriangular(M(undef, 2*m, 2*m))
-  intermediate_2 = LowerTriangular(M(undef, 2*m, 2*m))
-  inverse_intermediate_1 = UpperTriangular(M(undef, 2*m, 2*m))
-  inverse_intermediate_2 = LowerTriangular(M(undef, 2*m, 2*m))
-  intermediary_vector = V(undef, 2*m)
-  sol = V(undef, 2*m)
-  return CompressedLBFGS{T,M,V}(m, n, k, α, Sₖ, Yₖ, Dₖ, Lₖ, chol_matrix, intermediate_diagonal, intermediate_1, intermediate_2, inverse_intermediate_1, inverse_intermediate_2, intermediary_vector, sol)
+  chol_matrix = M(undef, mem, mem)
+  intermediate_diagonal = Diagonal(V(undef, mem))
+  intermediate_1 = UpperTriangular(M(undef, 2*mem, 2*mem))
+  intermediate_2 = LowerTriangular(M(undef, 2*mem, 2*mem))
+  inverse_intermediate_1 = UpperTriangular(M(undef, 2*mem, 2*mem))
+  inverse_intermediate_2 = LowerTriangular(M(undef, 2*mem, 2*mem))
+  intermediary_vector = V(undef, 2*mem)
+  sol = V(undef, 2*mem)
+  return CompressedLBFGSOperator{T,M,V}(mem, n, k, α, Sₖ, Yₖ, Dₖ, Lₖ, chol_matrix, intermediate_diagonal, intermediate_1, intermediate_2, inverse_intermediate_1, inverse_intermediate_2, intermediary_vector, sol)
 end
 
-function Base.push!(op::CompressedLBFGS{T,M,V}, s::V, y::V) where {T,M,V<:AbstractVector{T}}
-  if op.k < op.m # still some place in the structures
+function Base.push!(op::CompressedLBFGSOperator{T,M,V}, s::V, y::V) where {T,M,V<:AbstractVector{T}}
+  if op.k < op.mem # still some place in the structures
     op.k += 1
     view(op.Sₖ, :, op.k) .= s
     view(op.Yₖ, :, op.k) .= y
     view(op.Dₖ.diag, op.k) .= dot(s, y)
     mul!(view(op.Lₖ.data, op.k, 1:op.k-1), transpose(view(op.Yₖ, :, 1:op.k-1)), view(op.Sₖ, :, op.k) )
-  else # k == m update circurlarly the intermediary structures
+  else # k == mem update circurlarly the intermediary structures
     columnshift!(op.Sₖ; indicemax=op.k)
     columnshift!(op.Yₖ; indicemax=op.k)
-    op.Dₖ .= circshift(op.Dₖ, (-1, -1))
+    # op.Dₖ .= circshift(op.Dₖ, (-1, -1))
+    vectorshift!(op.Dₖ.diag; indicemax=op.k)
     view(op.Sₖ, :, op.k) .= s
     view(op.Yₖ, :, op.k) .= y
     view(op.Dₖ.diag, op.k) .= dot(s, y)
 
-    map(i-> view(op.Lₖ, i:op.m-1, i-1) .= view(op.Lₖ, i+1:op.m, i), 2:op.m)
+    map(i-> view(op.Lₖ, i:op.mem-1, i-1) .= view(op.Lₖ, i+1:op.mem, i), 2:op.mem)
     mul!(view(op.Lₖ.data, op.k, 1:op.k-1), transpose(view(op.Yₖ, :, 1:op.k-1)), view(op.Sₖ, :, op.k) )
   end
 
@@ -127,7 +128,7 @@ end
 
 # Algorithm 3.2 (p15)
 # Theorem 2.3 (p6)
-function Base.Matrix(op::CompressedLBFGS{T,M,V}) where {T,M,V}
+function Base.Matrix(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V}
   B₀ = M(zeros(T, op.n, op.n))
   map(i -> B₀[i, i] = op.α, 1:op.n)
 
@@ -147,7 +148,7 @@ end
 
 # Algorithm 3.2 (p15)
 # step 4, Jₖ is computed only if needed
-function inverse_cholesky(op::CompressedLBFGS{T,M,V}) where {T,M,V}
+function inverse_cholesky(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V}
   view(op.intermediate_diagonal.diag, 1:op.k) .= inv.(view(op.Dₖ.diag, 1:op.k))
   
   mul!(view(op.inverse_intermediate_1, 1:op.k, 1:op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k), transpose(view(op.Lₖ, 1:op.k, 1:op.k)))
@@ -161,7 +162,7 @@ function inverse_cholesky(op::CompressedLBFGS{T,M,V}) where {T,M,V}
 end
 
 # step 6, must be improve
-function precompile_iterated_structure!(op::CompressedLBFGS)
+function precompile_iterated_structure!(op::CompressedLBFGSOperator)
   Jₖ = inverse_cholesky(op)
 
   # constant update
@@ -186,7 +187,7 @@ function precompile_iterated_structure!(op::CompressedLBFGS)
 end
 
 # Algorithm 3.2 (p15)
-function LinearAlgebra.mul!(Bv::V, op::CompressedLBFGS{T,M,V}, v::V) where {T,M,V<:AbstractVector{T}}
+function LinearAlgebra.mul!(Bv::V, op::CompressedLBFGSOperator{T,M,V}, v::V) where {T,M,V<:AbstractVector{T}}
   # step 1-4 and 6 mainly done by Base.push!
   # step 5
   mul!(view(op.sol, 1:op.k), transpose(view(op.Yₖ, :, 1:op.k)), v)
