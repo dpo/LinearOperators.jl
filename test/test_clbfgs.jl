@@ -3,13 +3,15 @@
   n=100
   n=5
   lbfgs = CompressedLBFGS(n) # m=5
-  Bv = rand(n)
+  V = LinearOperators.default_vector_type(LinearOperators.default_gpu())
+  Bv = V(rand(n))
+  s = V(rand(n))
+  mul!(Bv, lbfgs, s) # warm-up
   for i in 1:iter
-    s = rand(n)
-    y = rand(n)
+    s = V(rand(n))
+    y = V(rand(n))
     push!(lbfgs, s, y)
     # warmp-up computing the mandatory intermediate structures
-    mul!(Bv, lbfgs, s)
     allocs = @allocated mul!(Bv, lbfgs, s)
     @test allocs == 0
     @test Bv ≈ y
