@@ -1,4 +1,3 @@
-module ModCompressedLBFGSOperator
 #=
 Compressed LBFGS implementation from:
     REPRESENTATIONS OF QUASI-NEWTON MATRICES AND THEIR USE IN LIMITED MEMORY METHODS
@@ -213,9 +212,3 @@ function LinearAlgebra.mul!(Bv::V, op::CompressedLBFGSOperator{T,M,V}, v::V) whe
   Bv .+= op.α .* v 
   return Bv
 end
-
-end
-
-using ..ModCompressedLBFGSOperator
-export CompressedLBFGSOperator
-export default_matrix_type, default_vector_type

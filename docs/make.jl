@@ -1,5 +1,4 @@
 using Documenter, LinearOperators
-using LinearOperators.ModCompressedLBFGSOperator
 
 makedocs(
   modules = [LinearOperators],

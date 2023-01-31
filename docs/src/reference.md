@@ -13,5 +13,5 @@ Pages = ["reference.md"]
 ```
 
 ```@autodocs
-Modules = [LinearOperators, ModCompressedLBFGSOperator]
+Modules = [LinearOperators]
 ```
