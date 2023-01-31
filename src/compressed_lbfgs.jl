@@ -148,7 +148,7 @@ function Base.Matrix(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V}
   (op.k > 0) && (_C[1:op.k, 1:op.k] .= transpose(op.Sₖ[:, 1:op.k]) * op.Sₖ[:, 1:op.k])
   (op.k > 0) && (_C[1:op.k, op.k+1:2*op.k] .= op.Lₖ[1:op.k, 1:op.k])
   (op.k > 0) && (_C[op.k+1:2*op.k, 1:op.k] .= transpose(op.Lₖ[1:op.k, 1:op.k]))
-  (op.k > 0) && (_C[op.k+1:2*op.k, op.k+1:2*op.k] .= .- op.Dₖ[1:op.k, 1:op.k])
+  (op.k > 0) && (_C[op.k+1:2*op.k, op.k+1:2*op.k] .-= op.Dₖ[1:op.k, 1:op.k])
   C = inv(_C)
 
   Bₖ = B₀ .- BSY * C * transpose(BSY)
