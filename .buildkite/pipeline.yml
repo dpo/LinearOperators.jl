@@ -9,7 +9,8 @@ steps:
     command: |
       julia --color=yes --project -e '
       using Pkg
-      Pkg.add("CUDA")
+      # Pkg.add("CUDA")
+      Pkg.add(url="https://github.com/JuliaGPU/CUDA.jl", rev="master")
       Pkg.instantiate()
       include("test/gpu/nvidia.jl")'
     timeout_in_minutes: 30
