@@ -138,7 +138,7 @@ end
 # Algorithm 3.2 (p15)
 # Theorem 2.3 (p6)
 function Base.Matrix(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V}
-  B₀ = M(zeros(T, op.n, op.n))
+  B₀ = M(undef, op.n, op.n)
   map(i -> B₀[i, i] = op.α, 1:op.n)
 
   BSY = M(undef, op.n, 2*op.k)
