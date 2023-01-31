@@ -94,7 +94,7 @@ function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, M=default_matrix
   Yₖ = M(undef, n, mem)
   Dₖ = Diagonal(V(undef, mem))
   Lₖ = LowerTriangular(M(undef, mem, mem))
-  Lₖ.data .= (T)(0)
+  Lₖ.data .= zero(T)
 
   chol_matrix = M(undef, mem, mem)
   intermediate_diagonal = Diagonal(V(undef, mem))
