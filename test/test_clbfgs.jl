@@ -3,7 +3,7 @@
   n=100
   n=5
   lbfgs = CompressedLBFGSOperator(n) # m=5
-  V = LinearOperators.default_vector_type(LinearOperators.default_gpu())
+  V = LinearOperators.default_vector_type()
   Bv = V(rand(n))
   s = V(rand(n))
   mul!(Bv, lbfgs, s) # warm-up

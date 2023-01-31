@@ -1,3 +1,4 @@
+module ModCompressedLBFGSOperator
 #=
 Compressed LBFGS implementation from:
     REPRESENTATIONS OF QUASI-NEWTON MATRICES AND THEIR USE IN LIMITED MEMORY METHODS
@@ -8,9 +9,21 @@ Implemented by Paul Raynaud (supervised by Dominique Orban)
 =#
 
 using LinearAlgebra, LinearAlgebra.BLAS
-using CUDA
+using Requires
+
+default_matrix_type(; T::DataType=Float64) = Matrix{T}
+default_vector_type(; T::DataType=Float64) = Vector{T}
+
+@init begin
+  @require CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba" begin
+    default_matrix_type(; T::DataType=Float64) = CUDA.CuMatrix{T}
+    default_vector_type(; T::DataType=Float64) = CUDA.CuVector{T}
+  end
+  # this scheme may be extended to other GPU modules
+end
 
 export CompressedLBFGSOperator
+export default_matrix_type, default_vector_type
 
 """
     CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
@@ -58,10 +71,6 @@ mutable struct CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVecto
   sol::V # mem
 end
 
-default_gpu() = CUDA.functional() ? true : false
-default_matrix_type(gpu::Bool; T::DataType=Float64) = gpu ? CuMatrix{T} : Matrix{T}
-default_vector_type(gpu::Bool; T::DataType=Float64) = gpu ? CuVector{T} : Vector{T}
-
 function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=size(A)[1]) where T
   map(i-> view(A,:,i+direction) .= view(A,:,i), 1-direction:indicemax)
   return A
@@ -78,7 +87,7 @@ end
 A implementation of a LBFGS operator (forward), representing a `nxn` linear application.
 It considers at most `k` BFGS iterates, and fit the architecture depending if it is launched on a CPU or a GPU.
 """
-function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, gpu=default_gpu(), M=default_matrix_type(gpu; T), V=default_vector_type(gpu; T))
+function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, M=default_matrix_type(; T), V=default_vector_type(; T))
   α = (T)(1)
   k = 0  
   Sₖ = M(undef, n, mem)
@@ -204,3 +213,9 @@ function LinearAlgebra.mul!(Bv::V, op::CompressedLBFGSOperator{T,M,V}, v::V) whe
   Bv .+= op.α .* v 
   return Bv
 end
+
+end
+
+using ..ModCompressedLBFGSOperator
+export CompressedLBFGSOperator
+export default_matrix_type, default_vector_type
