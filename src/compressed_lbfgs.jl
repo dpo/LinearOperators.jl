@@ -16,8 +16,8 @@ default_vector_type(; T::DataType=Float64) = Vector{T}
 
 @init begin
   @require CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba" begin
-    default_matrix_type(; T::DataType=Float64) = CUDA.CuMatrix{T}
-    default_vector_type(; T::DataType=Float64) = CUDA.CuVector{T}
+    default_matrix_type(; T::DataType=Float64) = CUDA.CuMatrix{T, CUDA.Mem.DeviceBuffer}
+    default_vector_type(; T::DataType=Float64) = CUDA.CuVector{T, CUDA.Mem.DeviceBuffer}
   end
   # this scheme may be extended to other GPU modules
 end
@@ -94,7 +94,7 @@ function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, M=default_matrix
   Yₖ = M(undef, n, mem)
   Dₖ = Diagonal(V(undef, mem))
   Lₖ = LowerTriangular(M(undef, mem, mem))
-  Lₖ .= (T)(0)
+  Lₖ.data .= (T)(0)
 
   chol_matrix = M(undef, mem, mem)
   intermediate_diagonal = Diagonal(V(undef, mem))
