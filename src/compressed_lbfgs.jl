@@ -10,22 +10,32 @@ Implemented by Paul Raynaud (supervised by Dominique Orban)
 using LinearAlgebra, LinearAlgebra.BLAS
 using Requires
 
+export CompressedLBFGSOperator, CompressedLBFGSData
+# export default_matrix_type, default_vector_type
+
 default_matrix_type(; T::DataType=Float64) = Matrix{T}
 default_vector_type(; T::DataType=Float64) = Vector{T}
 
 @init begin
   @require CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba" begin
-    default_matrix_type(; T::DataType=Float64) = CUDA.CuMatrix{T, CUDA.Mem.DeviceBuffer}
-    default_vector_type(; T::DataType=Float64) = CUDA.CuVector{T, CUDA.Mem.DeviceBuffer}
+    default_matrix_type(; T::DataType=Float64) = CUDA.functional() ? CUDA.CuMatrix{T, CUDA.Mem.DeviceBuffer} : Matrix{T}
+    default_vector_type(; T::DataType=Float64) = CUDA.functional() ? CUDA.CuVector{T, CUDA.Mem.DeviceBuffer} : Vector{T}
   end
-  # this scheme may be extended to other GPU modules
+  # this scheme may be extended to other GPU backend modules
 end
 
-export CompressedLBFGSOperator
-export default_matrix_type, default_vector_type
+function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=size(A)[1]) where T
+  map(i-> view(A,:,i+direction) .= view(A,:,i), 1-direction:indicemax)
+  return A
+end
+
+function vectorshift!(v::AbstractVector{T}; direction::Int=-1, indicemax::Int=length(v)) where T
+  view(v, 1:indicemax+direction) .= view(v,1-direction:indicemax)
+  return v
+end
 
 """
-    CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
+    CompressedLBFGSData{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
 
 A LBFGS limited-memory operator.
 It represents a linear application Rⁿˣⁿ, considering at most `mem` BFGS updates.
@@ -50,43 +60,35 @@ In addition to this structures which are circurlarly update when `k` reaches `me
 - `sol`: a vector ∈ Rᵏ to store intermediate solutions;
 This implementation is designed to work either on CPU or GPU.
 """
-mutable struct CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}}
+mutable struct CompressedLBFGSData{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}, I <: Integer}
   mem::Int # memory of the operator
-  n::Int # vector size
-  k::Int # k ≤ mem, active memory of the operator
+  n::I # vector size
+  k::I # k ≤ mem, active memory of the operator
   α::T # B₀ = αI
-  Sₖ::M # gather all sₖ₋ₘ 
-  Yₖ::M # gather all yₖ₋ₘ 
+  Sₖ::M # gather all sₖ₋ₘ : n * mem
+  Yₖ::M # gather all yₖ₋ₘ : n * mem
   Dₖ::Diagonal{T,V} # mem * mem
   Lₖ::LowerTriangular{T,M} # mem * mem
 
-  chol_matrix::M # 2m * 2m
+  chol_matrix::M # 2mem * 2mem
   intermediate_diagonal::Diagonal{T,V} # mem * mem
-  intermediate_1::UpperTriangular{T,M} # 2m * 2m
-  intermediate_2::LowerTriangular{T,M} # 2m * 2m
-  inverse_intermediate_1::UpperTriangular{T,M} # 2m * 2m
-  inverse_intermediate_2::LowerTriangular{T,M} # 2m * 2m
-  intermediary_vector::V # 2m
-  sol::V # mem
-end
+  intermediate_1::UpperTriangular{T,M} # 2mem * 2mem
+  intermediate_2::LowerTriangular{T,M} # 2mem * 2mem
+  inverse_intermediate_1::UpperTriangular{T,M} # 2mem * 2mem
+  inverse_intermediate_2::LowerTriangular{T,M} # 2mem * 2mem
+  intermediary_vector::V # 2mem
+  sol::V # 2mem
 
-function columnshift!(A::AbstractMatrix{T}; direction::Int=-1, indicemax::Int=size(A)[1]) where T
-  map(i-> view(A,:,i+direction) .= view(A,:,i), 1-direction:indicemax)
-  return A
-end
-
-function vectorshift!(v::AbstractVector{T}; direction::Int=-1, indicemax::Int=length(v)) where T
-  view(v, 1:indicemax+direction) .= view(v,1-direction:indicemax)
-  return v
+  nprod::I
 end
 
 """
-    CompressedLBFGSOperator(n::Int; [T=Float64, mem=5], gpu:Bool)
+    CompressedLBFGSData(n::Int; [T=Float64, mem=5], gpu:Bool)
 
 A implementation of a LBFGS operator (forward), representing a `nxn` linear application.
 It considers at most `k` BFGS iterates, and fit the architecture depending if it is launched on a CPU or a GPU.
 """
-function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, M=default_matrix_type(; T), V=default_vector_type(; T))
+function CompressedLBFGSData(n::I; mem::I=5, T=Float64, M=default_matrix_type(; T), V=default_vector_type(; T)) where {I<:Integer}
   α = (T)(1)
   k = 0  
   Sₖ = M(undef, n, mem)
@@ -103,51 +105,93 @@ function CompressedLBFGSOperator(n::Int; mem::Int=5, T=Float64, M=default_matrix
   inverse_intermediate_2 = LowerTriangular(M(undef, 2*mem, 2*mem))
   intermediary_vector = V(undef, 2*mem)
   sol = V(undef, 2*mem)
-  return CompressedLBFGSOperator{T,M,V}(mem, n, k, α, Sₖ, Yₖ, Dₖ, Lₖ, chol_matrix, intermediate_diagonal, intermediate_1, intermediate_2, inverse_intermediate_1, inverse_intermediate_2, intermediary_vector, sol)
+
+  nprod = 0
+
+  return CompressedLBFGSData{T,M,V,I}(mem, n, k, α, Sₖ, Yₖ, Dₖ, Lₖ, chol_matrix, intermediate_diagonal, intermediate_1, intermediate_2, inverse_intermediate_1, inverse_intermediate_2, intermediary_vector, sol, nprod)
 end
 
-function Base.push!(op::CompressedLBFGSOperator{T,M,V}, s::V, y::V) where {T,M,V<:AbstractVector{T}}
-  if op.k < op.mem # still some place in the structures
-    op.k += 1
-    view(op.Sₖ, :, op.k) .= s
-    view(op.Yₖ, :, op.k) .= y
-    view(op.Dₖ.diag, op.k) .= dot(s, y)
-    mul!(view(op.Lₖ.data, op.k, 1:op.k-1), transpose(view(op.Yₖ, :, 1:op.k-1)), view(op.Sₖ, :, op.k) )
-  else # k == mem update circurlarly the intermediary structures
-    columnshift!(op.Sₖ; indicemax=op.k)
-    columnshift!(op.Yₖ; indicemax=op.k)
-    # op.Dₖ .= circshift(op.Dₖ, (-1, -1))
-    vectorshift!(op.Dₖ.diag; indicemax=op.k)
-    view(op.Sₖ, :, op.k) .= s
-    view(op.Yₖ, :, op.k) .= y
-    view(op.Dₖ.diag, op.k) .= dot(s, y)
+mutable struct CompressedLBFGSOperator{T, M<:AbstractMatrix{T}, V<:AbstractVector{T}, F, I <: Integer}  <: AbstractQuasiNewtonOperator{T}
+  nrow::I
+  ncol::I
+  symmetric::Bool
+  hermitian::Bool
+  Bv::V
+  data::CompressedLBFGSData{T,M,V}
+  prod!::F    # apply the operator to a vector
+  tprod!::F    # apply the transpose operator to a vector
+  ctprod!::F   # apply the transpose conjugate operator to a vector
+end
 
-    map(i-> view(op.Lₖ, i:op.mem-1, i-1) .= view(op.Lₖ, i+1:op.mem, i), 2:op.mem)
-    mul!(view(op.Lₖ.data, op.k, 1:op.k-1), transpose(view(op.Yₖ, :, 1:op.k-1)), view(op.Sₖ, :, op.k) )
+function CompressedLBFGSOperator(n::I; mem::I=5, T=Float64, M=default_matrix_type(; T), V=default_vector_type(; T)) where {I <: Integer}
+  nrow = n
+  ncol = n
+  symmetric = true
+  hermitian = true
+  Bv = V(undef, n)
+  data = CompressedLBFGSData(n; mem, T, M, V)
+
+  prod! = @closure (res, v, α, β) -> begin
+    mul!(Bv, data, v)
+    if β == zero(T)
+      res .= α .* Bv
+    else
+      res .= α .* Bv .+ β .* res
+    end
+  end    
+
+  F = typeof(prod!)
+  
+  return CompressedLBFGSOperator{T,M,V,F,I}(nrow, ncol, symmetric, hermitian, Bv, data, prod!, prod!, prod!)
+end
+
+has_args5(op::CompressedLBFGSOperator) = true
+use_prod5!(op::CompressedLBFGSOperator) = true
+
+Base.push!(op::CompressedLBFGSOperator{T,M,V}, s::V, y::V) where {T,M,V<:AbstractVector{T}} = Base.push!(op.data, s, y)
+function Base.push!(data::CompressedLBFGSData{T,M,V}, s::V, y::V) where {T,M,V<:AbstractVector{T}}
+  if data.k < data.mem # still some place in the structures
+    data.k += 1
+    view(data.Sₖ, :, data.k) .= s
+    view(data.Yₖ, :, data.k) .= y
+    view(data.Dₖ.diag, data.k) .= dot(s, y)
+    mul!(view(data.Lₖ.data, data.k, 1:data.k-1), transpose(view(data.Yₖ, :, 1:data.k-1)), view(data.Sₖ, :, data.k) )
+  else # k == mem update circurlarly the intermediary structures
+    columnshift!(data.Sₖ; indicemax=data.k)
+    columnshift!(data.Yₖ; indicemax=data.k)
+    # data.Dₖ .= circshift(data.Dₖ, (-1, -1))
+    vectorshift!(data.Dₖ.diag; indicemax=data.k)
+    view(data.Sₖ, :, data.k) .= s
+    view(data.Yₖ, :, data.k) .= y
+    view(data.Dₖ.diag, data.k) .= dot(s, y)
+
+    map(i-> view(data.Lₖ, i:data.mem-1, i-1) .= view(data.Lₖ, i+1:data.mem, i), 2:data.mem)
+    mul!(view(data.Lₖ.data, data.k, 1:data.k-1), transpose(view(data.Yₖ, :, 1:data.k-1)), view(data.Sₖ, :, data.k) )
   end
 
   # step 4 and 6
-  precompile_iterated_structure!(op)
+  precompile_iterated_structure!(data)
 
   # secant equation fails if uncommented
-  # op.α = dot(y,s)/dot(s,s)
-  return op
+  # data.α = dot(y,s)/dot(s,s)
+  return data
 end
 
 # Algorithm 3.2 (p15)
 # Theorem 2.3 (p6)
-function Base.Matrix(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V}
-  B₀ = M(undef, op.n, op.n)
-  map(i -> B₀[i, i] = op.α, 1:op.n)
+Base.Matrix(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V} = Base.Matrix(op.data)
+function Base.Matrix(data::CompressedLBFGSData{T,M,V}) where {T,M,V}
+  B₀ = M(undef, data.n, data.n)
+  map(i -> B₀[i, i] = data.α, 1:data.n)
 
-  BSY = M(undef, op.n, 2*op.k)
-  (op.k > 0) && (BSY[:, 1:op.k] = B₀ * op.Sₖ[:, 1:op.k])
-  (op.k > 0) && (BSY[:, op.k+1:2*op.k] = op.Yₖ[:, 1:op.k])
-  _C = M(undef, 2*op.k, 2*op.k)
-  (op.k > 0) && (_C[1:op.k, 1:op.k] .= transpose(op.Sₖ[:, 1:op.k]) * op.Sₖ[:, 1:op.k])
-  (op.k > 0) && (_C[1:op.k, op.k+1:2*op.k] .= op.Lₖ[1:op.k, 1:op.k])
-  (op.k > 0) && (_C[op.k+1:2*op.k, 1:op.k] .= transpose(op.Lₖ[1:op.k, 1:op.k]))
-  (op.k > 0) && (_C[op.k+1:2*op.k, op.k+1:2*op.k] .-= op.Dₖ[1:op.k, 1:op.k])
+  BSY = M(undef, data.n, 2*data.k)
+  (data.k > 0) && (BSY[:, 1:data.k] = B₀ * data.Sₖ[:, 1:data.k])
+  (data.k > 0) && (BSY[:, data.k+1:2*data.k] = data.Yₖ[:, 1:data.k])
+  _C = M(undef, 2*data.k, 2*data.k)
+  (data.k > 0) && (_C[1:data.k, 1:data.k] .= transpose(data.Sₖ[:, 1:data.k]) * data.Sₖ[:, 1:data.k])
+  (data.k > 0) && (_C[1:data.k, data.k+1:2*data.k] .= data.Lₖ[1:data.k, 1:data.k])
+  (data.k > 0) && (_C[data.k+1:2*data.k, 1:data.k] .= transpose(data.Lₖ[1:data.k, 1:data.k]))
+  (data.k > 0) && (_C[data.k+1:2*data.k, data.k+1:2*data.k] .-= data.Dₖ[1:data.k, 1:data.k])
   C = inv(_C)
 
   Bₖ = B₀ .- BSY * C * transpose(BSY)
@@ -156,59 +200,71 @@ end
 
 # Algorithm 3.2 (p15)
 # step 4, Jₖ is computed only if needed
-function inverse_cholesky(op::CompressedLBFGSOperator{T,M,V}) where {T,M,V}
-  view(op.intermediate_diagonal.diag, 1:op.k) .= inv.(view(op.Dₖ.diag, 1:op.k))
+function inverse_cholesky(data::CompressedLBFGSData{T,M,V}) where {T,M,V}
+  view(data.intermediate_diagonal.diag, 1:data.k) .= inv.(view(data.Dₖ.diag, 1:data.k))
   
-  mul!(view(op.inverse_intermediate_1, 1:op.k, 1:op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k), transpose(view(op.Lₖ, 1:op.k, 1:op.k)))
-  mul!(view(op.chol_matrix, 1:op.k, 1:op.k), view(op.Lₖ, 1:op.k, 1:op.k), view(op.inverse_intermediate_1, 1:op.k, 1:op.k))
+  mul!(view(data.inverse_intermediate_1, 1:data.k, 1:data.k), view(data.intermediate_diagonal, 1:data.k, 1:data.k), transpose(view(data.Lₖ, 1:data.k, 1:data.k)))
+  mul!(view(data.chol_matrix, 1:data.k, 1:data.k), view(data.Lₖ, 1:data.k, 1:data.k), view(data.inverse_intermediate_1, 1:data.k, 1:data.k))
 
-  mul!(view(op.chol_matrix, 1:op.k, 1:op.k), transpose(view(op.Sₖ, :, 1:op.k)), view(op.Sₖ, :, 1:op.k), op.α, (T)(1))
+  mul!(view(data.chol_matrix, 1:data.k, 1:data.k), transpose(view(data.Sₖ, :, 1:data.k)), view(data.Sₖ, :, 1:data.k), data.α, (T)(1))
 
-  cholesky!(Symmetric(view(op.chol_matrix, 1:op.k, 1:op.k)))
-  Jₖ = transpose(UpperTriangular(view(op.chol_matrix, 1:op.k, 1:op.k)))
+  cholesky!(Symmetric(view(data.chol_matrix, 1:data.k, 1:data.k)))
+  Jₖ = transpose(UpperTriangular(view(data.chol_matrix, 1:data.k, 1:data.k)))
   return Jₖ
 end
 
 # step 6, must be improve
-function precompile_iterated_structure!(op::CompressedLBFGSOperator)
-  Jₖ = inverse_cholesky(op)
+function precompile_iterated_structure!(data::CompressedLBFGSData)
+  Jₖ = inverse_cholesky(data)
 
   # constant update
-  view(op.intermediate_1, op.k+1:2*op.k, 1:op.k) .= 0
-  view(op.intermediate_2, 1:op.k, op.k+1:2*op.k) .= 0
-  view(op.intermediate_1, op.k+1:2*op.k, op.k+1:2*op.k) .= transpose(Jₖ)
-  view(op.intermediate_2, op.k+1:2*op.k, op.k+1:2*op.k) .= Jₖ
+  view(data.intermediate_1, data.k+1:2*data.k, 1:data.k) .= 0
+  view(data.intermediate_2, 1:data.k, data.k+1:2*data.k) .= 0
+  view(data.intermediate_1, data.k+1:2*data.k, data.k+1:2*data.k) .= transpose(Jₖ)
+  view(data.intermediate_2, data.k+1:2*data.k, data.k+1:2*data.k) .= Jₖ
 
   # updates related to D^(1/2)
-  view(op.intermediate_diagonal.diag, 1:op.k) .= sqrt.(view(op.Dₖ.diag, 1:op.k))
-  view(op.intermediate_1, 1:op.k,1:op.k) .= .- view(op.intermediate_diagonal, 1:op.k, 1:op.k)
-  view(op.intermediate_2, 1:op.k, 1:op.k) .= view(op.intermediate_diagonal, 1:op.k, 1:op.k)
+  view(data.intermediate_diagonal.diag, 1:data.k) .= sqrt.(view(data.Dₖ.diag, 1:data.k))
+  view(data.intermediate_1, 1:data.k,1:data.k) .= .- view(data.intermediate_diagonal, 1:data.k, 1:data.k)
+  view(data.intermediate_2, 1:data.k, 1:data.k) .= view(data.intermediate_diagonal, 1:data.k, 1:data.k)
 
   # updates related to D^(-1/2)
-  view(op.intermediate_diagonal.diag, 1:op.k) .= (x -> 1/sqrt(x)).(view(op.Dₖ.diag, 1:op.k))
-  mul!(view(op.intermediate_1, 1:op.k,op.k+1:2*op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k), transpose(view(op.Lₖ, 1:op.k, 1:op.k)))
-  mul!(view(op.intermediate_2, op.k+1:2*op.k, 1:op.k), view(op.Lₖ, 1:op.k, 1:op.k), view(op.intermediate_diagonal, 1:op.k, 1:op.k))
-  view(op.intermediate_2, op.k+1:2*op.k, 1:op.k) .= view(op.intermediate_2, op.k+1:2*op.k, 1:op.k) .* -1
+  view(data.intermediate_diagonal.diag, 1:data.k) .= (x -> 1/sqrt(x)).(view(data.Dₖ.diag, 1:data.k))
+  mul!(view(data.intermediate_1, 1:data.k,data.k+1:2*data.k), view(data.intermediate_diagonal, 1:data.k, 1:data.k), transpose(view(data.Lₖ, 1:data.k, 1:data.k)))
+  mul!(view(data.intermediate_2, data.k+1:2*data.k, 1:data.k), view(data.Lₖ, 1:data.k, 1:data.k), view(data.intermediate_diagonal, 1:data.k, 1:data.k))
+  view(data.intermediate_2, data.k+1:2*data.k, 1:data.k) .= view(data.intermediate_2, data.k+1:2*data.k, 1:data.k) .* -1
   
-  view(op.inverse_intermediate_1, 1:2*op.k, 1:2*op.k) .= inv(op.intermediate_1[1:2*op.k, 1:2*op.k])
-  view(op.inverse_intermediate_2, 1:2*op.k, 1:2*op.k) .= inv(op.intermediate_2[1:2*op.k, 1:2*op.k])
+  view(data.inverse_intermediate_1, 1:2*data.k, 1:2*data.k) .= inv(data.intermediate_1[1:2*data.k, 1:2*data.k])
+  view(data.inverse_intermediate_2, 1:2*data.k, 1:2*data.k) .= inv(data.intermediate_2[1:2*data.k, 1:2*data.k])
 end
 
 # Algorithm 3.2 (p15)
-function LinearAlgebra.mul!(Bv::V, op::CompressedLBFGSOperator{T,M,V}, v::V) where {T,M,V<:AbstractVector{T}}
+LinearAlgebra.mul!(Bv::V, op::CompressedLBFGSOperator{T,M,V}, v::V) where {T,M,V<:AbstractVector{T}} = LinearAlgebra.mul!(Bv, op.data, v)
+function LinearAlgebra.mul!(Bv::V, data::CompressedLBFGSData{T,M,V}, v::V) where {T,M,V<:AbstractVector{T}}
+  data.nprod += 1
   # step 1-4 and 6 mainly done by Base.push!
   # step 5
-  mul!(view(op.sol, 1:op.k), transpose(view(op.Yₖ, :, 1:op.k)), v)
-  mul!(view(op.sol, op.k+1:2*op.k), transpose(view(op.Sₖ, :, 1:op.k)), v)
-  # scal!(op.α, view(op.sol, op.k+1:2*op.k)) # more allocation, slower
-  view(op.sol, op.k+1:2*op.k) .*= op.α
+  mul!(view(data.sol, 1:data.k), transpose(view(data.Yₖ, :, 1:data.k)), v)
+  mul!(view(data.sol, data.k+1:2*data.k), transpose(view(data.Sₖ, :, 1:data.k)), v)
+  # scal!(data.α, view(data.sol, data.k+1:2*data.k)) # more allocation, slower
+  view(data.sol, data.k+1:2*data.k) .*= data.α
 
-  mul!(view(op.intermediary_vector, 1:2*op.k), view(op.inverse_intermediate_2, 1:2*op.k, 1:2*op.k), view(op.sol, 1:2*op.k))
-  mul!(view(op.sol, 1:2*op.k), view(op.inverse_intermediate_1, 1:2*op.k, 1:2*op.k), view(op.intermediary_vector, 1:2*op.k))
+  mul!(view(data.intermediary_vector, 1:2*data.k), view(data.inverse_intermediate_2, 1:2*data.k, 1:2*data.k), view(data.sol, 1:2*data.k))
+  mul!(view(data.sol, 1:2*data.k), view(data.inverse_intermediate_1, 1:2*data.k, 1:2*data.k), view(data.intermediary_vector, 1:2*data.k))
   
   # step 7 
-  mul!(Bv, view(op.Yₖ, :, 1:op.k),  view(op.sol, 1:op.k))
-  mul!(Bv, view(op.Sₖ, :, 1:op.k), view(op.sol, op.k+1:2*op.k), - op.α, (T)(-1))
-  Bv .+= op.α .* v 
+  mul!(Bv, view(data.Yₖ, :, 1:data.k),  view(data.sol, 1:data.k))
+  mul!(Bv, view(data.Sₖ, :, 1:data.k), view(data.sol, data.k+1:2*data.k), - data.α, (T)(-1))
+  Bv .+= data.α .* v 
   return Bv
+end
+
+"""
+    reset!(op)
+
+Resets the CompressedLBFGS data of the given operator.
+"""
+function reset!(op::CompressedLBFGSOperator) 
+  op.data.nprod = 0
+  return op
 end
