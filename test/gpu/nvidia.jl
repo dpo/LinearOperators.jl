@@ -14,3 +14,5 @@ using LinearOperators, CUDA, CUDA.CUSPARSE, CUDA.CUSOLVER
   y = M * v
   @test y isa CuVector{Float32}
 end
+
+include("../test_clbfgs.jl")
